@@ -6,3 +6,5 @@ class PEAudio{
   public:
     void boo();
 }; 
+
+int test_audio();
