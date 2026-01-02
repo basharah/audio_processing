@@ -9,3 +9,5 @@
 - Low-pass and high-pass filters (first-order RC).
 - Butterworth low/high filter with filtfilt-style processing (order 2/4).
 - Stereo-to-mono conversion (channel averaging).
+- Log mel-spectrogram computation.
+- PCEN mel-spectrogram computation.

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstring>
 
 PEAudoBuffer resample_buffer(const PEAudoBuffer& input,
@@ -366,4 +367,268 @@ PEAudoBuffer butterworth_filter(const PEAudoBuffer& input, float cutoff_hz,
   }
 
   return output;
+}
+
+static float hz_to_mel(float hz) {
+  return 2595.0f * std::log10(1.0f + hz / 700.0f);
+}
+
+static float mel_to_hz(float mel) {
+  return 700.0f * (std::pow(10.0f, mel / 2595.0f) - 1.0f);
+}
+
+static std::vector<float> mixdown_mono(const PEAudoBuffer& input) {
+  std::vector<float> mono;
+  if (input.samples.empty() || input.channels == 0) {
+    return mono;
+  }
+  if (input.channels == 1) {
+    mono = input.samples;
+    return mono;
+  }
+  const std::size_t frames = input.samples.size() / input.channels;
+  mono.resize(frames);
+  for (std::size_t frame = 0; frame < frames; ++frame) {
+    float sum = 0.0f;
+    std::size_t idx = frame * input.channels;
+    for (std::size_t ch = 0; ch < input.channels; ++ch) {
+      sum += input.samples[idx + ch];
+    }
+    mono[frame] = sum / static_cast<float>(input.channels);
+  }
+  return mono;
+}
+
+static std::vector<float> make_hann_window(std::uint32_t win_length) {
+  std::vector<float> window(win_length, 0.0f);
+  if (win_length == 0) {
+    return window;
+  }
+  if (win_length == 1) {
+    window[0] = 1.0f;
+    return window;
+  }
+  for (std::uint32_t n = 0; n < win_length; ++n) {
+    window[n] = 0.5f - 0.5f * std::cos(2.0f * 3.14159265f * n / (win_length - 1));
+  }
+  return window;
+}
+
+static std::vector<float> make_mel_filterbank(std::uint32_t sample_rate,
+                                              std::uint32_t n_fft,
+                                              std::uint32_t total_mels,
+                                              float fmin, float fmax) {
+  const std::uint32_t bins = n_fft / 2 + 1;
+  std::vector<float> bank(total_mels * bins, 0.0f);
+  if (total_mels == 0 || bins == 0 || sample_rate == 0) {
+    return bank;
+  }
+
+  const float nyquist = 0.5f * static_cast<float>(sample_rate);
+  float fmin_clamped = std::max(0.0f, fmin);
+  float fmax_clamped = fmax <= 0.0f ? nyquist : std::min(fmax, nyquist);
+  if (fmax_clamped <= fmin_clamped) {
+    return bank;
+  }
+
+  float mel_min = hz_to_mel(fmin_clamped);
+  float mel_max = hz_to_mel(fmax_clamped);
+
+  std::vector<float> mel_points(total_mels + 2);
+  for (std::uint32_t i = 0; i < total_mels + 2; ++i) {
+    mel_points[i] = mel_min + (mel_max - mel_min) * (static_cast<float>(i) /
+                                                     static_cast<float>(total_mels + 1));
+  }
+
+  std::vector<float> hz_points(total_mels + 2);
+  for (std::uint32_t i = 0; i < total_mels + 2; ++i) {
+    hz_points[i] = mel_to_hz(mel_points[i]);
+  }
+
+  std::vector<float> bin_freqs(bins);
+  for (std::uint32_t i = 0; i < bins; ++i) {
+    bin_freqs[i] = static_cast<float>(i) * sample_rate / static_cast<float>(n_fft);
+  }
+
+  for (std::uint32_t m = 0; m < total_mels; ++m) {
+    float left = hz_points[m];
+    float center = hz_points[m + 1];
+    float right = hz_points[m + 2];
+    for (std::uint32_t k = 0; k < bins; ++k) {
+      float freq = bin_freqs[k];
+      float weight = 0.0f;
+      if (freq >= left && freq <= center) {
+        weight = (freq - left) / (center - left);
+      } else if (freq > center && freq <= right) {
+        weight = (right - freq) / (right - center);
+      }
+      if (weight < 0.0f) {
+        weight = 0.0f;
+      }
+      bank[m * bins + k] = weight;
+    }
+  }
+
+  return bank;
+}
+
+static MelSpectrogram compute_mel_spectrogram(const PEAudoBuffer& input,
+                                              std::uint32_t n_fft,
+                                              std::uint32_t hop_length,
+                                              std::uint32_t win_length,
+                                              std::uint32_t n_mels,
+                                              std::uint32_t total_mels,
+                                              float fmin, float fmax,
+                                              float power) {
+  MelSpectrogram result;
+  if (input.samples.empty() || input.sample_rate == 0 || input.channels == 0 ||
+      n_fft == 0 || hop_length == 0 || win_length == 0 || n_mels == 0 ||
+      total_mels == 0 || n_mels > total_mels || win_length > n_fft) {
+    return result;
+  }
+
+  std::vector<float> mono = mixdown_mono(input);
+  if (mono.size() < win_length) {
+    return result;
+  }
+
+  const std::uint32_t bins = n_fft / 2 + 1;
+  const std::size_t frames = 1 + (mono.size() - win_length) / hop_length;
+  if (frames == 0) {
+    return result;
+  }
+
+  std::vector<float> window = make_hann_window(win_length);
+  std::vector<float> filterbank = make_mel_filterbank(
+      input.sample_rate, n_fft, total_mels, fmin, fmax);
+
+  if (filterbank.empty()) {
+    return result;
+  }
+
+  result.frames = static_cast<std::uint32_t>(frames);
+  result.n_mels = n_mels;
+  result.total_mels = total_mels;
+  result.mel_spec.assign(total_mels * frames, 0.0f);
+
+  std::vector<float> fft_input(n_fft, 0.0f);
+  std::vector<float> spectrum(bins, 0.0f);
+
+  for (std::size_t frame = 0; frame < frames; ++frame) {
+    std::size_t start = frame * hop_length;
+    for (std::uint32_t i = 0; i < win_length; ++i) {
+      fft_input[i] = mono[start + i] * window[i];
+    }
+    for (std::uint32_t i = win_length; i < n_fft; ++i) {
+      fft_input[i] = 0.0f;
+    }
+
+    for (std::uint32_t k = 0; k < bins; ++k) {
+      float re = 0.0f;
+      float im = 0.0f;
+      for (std::uint32_t n = 0; n < n_fft; ++n) {
+        float angle = -2.0f * 3.14159265f * k * n / static_cast<float>(n_fft);
+        re += fft_input[n] * std::cos(angle);
+        im += fft_input[n] * std::sin(angle);
+      }
+      float mag = std::sqrt(re * re + im * im);
+      spectrum[k] = power == 1.0f ? mag : mag * mag;
+    }
+
+    for (std::uint32_t m = 0; m < total_mels; ++m) {
+      float sum = 0.0f;
+      const float* weights = &filterbank[m * bins];
+      for (std::uint32_t k = 0; k < bins; ++k) {
+        sum += weights[k] * spectrum[k];
+      }
+      result.mel_spec[m * frames + frame] = sum;
+    }
+  }
+
+  return result;
+}
+
+MelSpectrogram log_mel_spectrogram(const PEAudoBuffer& input,
+                                   std::uint32_t n_fft,
+                                   std::uint32_t hop_length,
+                                   std::uint32_t win_length,
+                                   std::uint32_t n_mels,
+                                   std::uint32_t total_mels,
+                                   float fmin,
+                                   float fmax) {
+  MelSpectrogram result = compute_mel_spectrogram(
+      input, n_fft, hop_length, win_length, n_mels, total_mels, fmin, fmax, 2.0f);
+  if (result.mel_spec.empty()) {
+    return result;
+  }
+
+  const std::size_t frames = result.frames;
+  result.normalized.assign(frames * n_mels, 0.0f);
+
+  float ref = 0.0f;
+  for (std::uint32_t m = 0; m < n_mels; ++m) {
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+      float v = result.mel_spec[m * frames + frame];
+      if (v > ref) {
+        ref = v;
+      }
+    }
+  }
+
+  const float amin = 1e-10f;
+  if (ref < amin) {
+    ref = amin;
+  }
+
+  for (std::uint32_t m = 0; m < n_mels; ++m) {
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+      float v = result.mel_spec[m * frames + frame];
+      float val = std::max(v, amin);
+      float db = 10.0f * std::log10(val / ref);
+      result.normalized[frame * n_mels + m] = db;
+    }
+  }
+
+  return result;
+}
+
+MelSpectrogram pcen_mel_spectrogram(const PEAudoBuffer& input,
+                                    std::uint32_t n_fft,
+                                    std::uint32_t hop_length,
+                                    std::uint32_t win_length,
+                                    std::uint32_t n_mels,
+                                    std::uint32_t total_mels,
+                                    float fmin,
+                                    float fmax) {
+  MelSpectrogram result = compute_mel_spectrogram(
+      input, n_fft, hop_length, win_length, n_mels, total_mels, fmin, fmax, 1.0f);
+  if (result.mel_spec.empty()) {
+    return result;
+  }
+
+  const std::size_t frames = result.frames;
+  result.normalized.assign(frames * n_mels, 0.0f);
+
+  const float gain = 0.8f;
+  const float bias = 10.0f;
+  const float power = 0.25f;
+  const float eps = 1e-6f;
+  const float scale = std::ldexp(1.0f, 31);
+  const float t = 0.06f;
+  const float b = std::exp(-static_cast<float>(hop_length) / (t * input.sample_rate));
+
+  std::vector<float> m_smooth(n_mels, 0.0f);
+
+  for (std::size_t frame = 0; frame < frames; ++frame) {
+    for (std::uint32_t m = 0; m < n_mels; ++m) {
+      float x = result.mel_spec[m * frames + frame] * scale;
+      float smooth = (frame == 0) ? x : (1.0f - b) * x + b * m_smooth[m];
+      m_smooth[m] = smooth;
+      float denom = std::pow(eps + smooth, gain);
+      float pcen = std::pow(x / denom + bias, power) - std::pow(bias, power);
+      result.normalized[frame * n_mels + m] = pcen;
+    }
+  }
+
+  return result;
 }
