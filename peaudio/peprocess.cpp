@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <complex>
 #include <cstring>
 
 PEAudoBuffer resample_buffer(const PEAudoBuffer& input,
@@ -226,6 +225,24 @@ static Biquad make_highpass(float sample_rate, float cutoff_hz, float q) {
   return {b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0};
 }
 
+static Biquad make_first_order_lowpass(float sample_rate, float cutoff_hz) {
+  const float k = std::tan(3.14159265f * cutoff_hz / sample_rate);
+  const float a0 = 1.0f + k;
+  const float b0 = k / a0;
+  const float b1 = b0;
+  const float a1 = (k - 1.0f) / a0;
+  return {b0, b1, 0.0f, a1, 0.0f};
+}
+
+static Biquad make_first_order_highpass(float sample_rate, float cutoff_hz) {
+  const float k = std::tan(3.14159265f * cutoff_hz / sample_rate);
+  const float a0 = 1.0f + k;
+  const float b0 = 1.0f / a0;
+  const float b1 = -b0;
+  const float a1 = (k - 1.0f) / a0;
+  return {b0, b1, 0.0f, a1, 0.0f};
+}
+
 static void run_sos_inplace(const std::vector<Biquad>& sos, float* data,
                             std::size_t frames, std::uint32_t channels) {
   for (const Biquad& bq : sos) {
@@ -296,12 +313,17 @@ static std::vector<Biquad> make_butterworth_sos(std::uint32_t sample_rate,
                                                 float cutoff_hz, bool is_low,
                                                 int order) {
   std::vector<Biquad> sos;
-  if (order <= 0 || (order % 2) != 0) {
+  if (order <= 0) {
     return sos;
   }
 
   const int sections = order / 2;
   sos.reserve(sections);
+
+  if ((order % 2) != 0) {
+    sos.push_back(is_low ? make_first_order_lowpass(sample_rate, cutoff_hz)
+                         : make_first_order_highpass(sample_rate, cutoff_hz));
+  }
 
   for (int k = 1; k <= sections; ++k) {
     float angle = static_cast<float>((2 * k - 1) * 3.14159265 / (2.0 * order));
@@ -337,7 +359,7 @@ PEAudoBuffer butterworth_filter(const PEAudoBuffer& input, float cutoff_hz,
 
   output = input;
   const std::size_t frames = output.samples.size() / output.channels;
-  if (frames < 2 || (order % 2) != 0) {
+  if (frames < 2) {
     return output;
   }
 
@@ -370,11 +392,27 @@ PEAudoBuffer butterworth_filter(const PEAudoBuffer& input, float cutoff_hz,
 }
 
 static float hz_to_mel(float hz) {
-  return 2595.0f * std::log10(1.0f + hz / 700.0f);
+  const float f_sp = 200.0f / 3.0f;
+  const float min_log_hz = 1000.0f;
+  const float min_log_mel = min_log_hz / f_sp;
+  const float logstep = std::log(6.4f) / 27.0f;
+
+  if (hz < min_log_hz) {
+    return hz / f_sp;
+  }
+  return min_log_mel + std::log(hz / min_log_hz) / logstep;
 }
 
 static float mel_to_hz(float mel) {
-  return 700.0f * (std::pow(10.0f, mel / 2595.0f) - 1.0f);
+  const float f_sp = 200.0f / 3.0f;
+  const float min_log_hz = 1000.0f;
+  const float min_log_mel = min_log_hz / f_sp;
+  const float logstep = std::log(6.4f) / 27.0f;
+
+  if (mel < min_log_mel) {
+    return f_sp * mel;
+  }
+  return min_log_hz * std::exp(logstep * (mel - min_log_mel));
 }
 
 static std::vector<float> mixdown_mono(const PEAudoBuffer& input) {
@@ -469,6 +507,18 @@ static std::vector<float> make_mel_filterbank(std::uint32_t sample_rate,
     }
   }
 
+  for (std::uint32_t m = 0; m < total_mels; ++m) {
+    float left = hz_points[m];
+    float right = hz_points[m + 2];
+    float scale = 0.0f;
+    if (right > left) {
+      scale = 2.0f / (right - left);
+    }
+    for (std::uint32_t k = 0; k < bins; ++k) {
+      bank[m * bins + k] *= scale;
+    }
+  }
+
   return bank;
 }
 
@@ -493,12 +543,39 @@ static MelSpectrogram compute_mel_spectrogram(const PEAudoBuffer& input,
   }
 
   const std::uint32_t bins = n_fft / 2 + 1;
-  const std::size_t frames = 1 + (mono.size() - win_length) / hop_length;
+  if (mono.size() <= n_fft / 2) {
+    return result;
+  }
+
+  const std::size_t pad = n_fft / 2;
+  std::vector<float> padded(mono.size() + 2 * pad);
+  for (std::size_t i = 0; i < pad; ++i) {
+    padded[i] = mono[pad - i];
+  }
+  for (std::size_t i = 0; i < mono.size(); ++i) {
+    padded[pad + i] = mono[i];
+  }
+  for (std::size_t i = 0; i < pad; ++i) {
+    padded[pad + mono.size() + i] = mono[mono.size() - 2 - i];
+  }
+
+  if (padded.size() < n_fft) {
+    return result;
+  }
+
+  const std::size_t frames = 1 + (padded.size() - n_fft) / hop_length;
   if (frames == 0) {
     return result;
   }
 
   std::vector<float> window = make_hann_window(win_length);
+  std::vector<float> window_nfft(n_fft, 0.0f);
+  if (win_length <= n_fft) {
+    std::size_t offset = (n_fft - win_length) / 2;
+    for (std::uint32_t i = 0; i < win_length; ++i) {
+      window_nfft[offset + i] = window[i];
+    }
+  }
   std::vector<float> filterbank = make_mel_filterbank(
       input.sample_rate, n_fft, total_mels, fmin, fmax);
 
@@ -516,11 +593,8 @@ static MelSpectrogram compute_mel_spectrogram(const PEAudoBuffer& input,
 
   for (std::size_t frame = 0; frame < frames; ++frame) {
     std::size_t start = frame * hop_length;
-    for (std::uint32_t i = 0; i < win_length; ++i) {
-      fft_input[i] = mono[start + i] * window[i];
-    }
-    for (std::uint32_t i = win_length; i < n_fft; ++i) {
-      fft_input[i] = 0.0f;
+    for (std::uint32_t i = 0; i < n_fft; ++i) {
+      fft_input[i] = padded[start + i] * window_nfft[i];
     }
 
     for (std::uint32_t k = 0; k < bins; ++k) {
@@ -580,11 +654,16 @@ MelSpectrogram log_mel_spectrogram(const PEAudoBuffer& input,
     ref = amin;
   }
 
+  const float top_db = 80.0f;
+  const float min_db = -top_db;
   for (std::uint32_t m = 0; m < n_mels; ++m) {
     for (std::size_t frame = 0; frame < frames; ++frame) {
       float v = result.mel_spec[m * frames + frame];
       float val = std::max(v, amin);
       float db = 10.0f * std::log10(val / ref);
+      if (db < min_db) {
+        db = min_db;
+      }
       result.normalized[frame * n_mels + m] = db;
     }
   }

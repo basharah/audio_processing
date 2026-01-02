@@ -1,6 +1,9 @@
 #include "peaudio.h"
 #include "peprocess.h"
 
+#include <iostream>
+#include <string>
+
 int main(){
   std::cout << "Audio Test Started" << std::endl;
   std::cout << "Recording Audio..." << std::endl;

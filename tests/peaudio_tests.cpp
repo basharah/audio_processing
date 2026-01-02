@@ -185,7 +185,7 @@ TEST(PeAudioProcess, ButterworthHighCutoffPassesThrough) {
   EXPECT_GT(corr, 0.99);
 }
 
-TEST(PeAudioProcess, ButterworthOddOrderReturnsInput) {
+TEST(PeAudioProcess, ButterworthOddOrderProducesOutput) {
   PEAudoBuffer input;
   input.sample_rate = 48000;
   input.channels = 1;
@@ -195,7 +195,12 @@ TEST(PeAudioProcess, ButterworthOddOrderReturnsInput) {
 
   EXPECT_EQ(output.sample_rate, input.sample_rate);
   EXPECT_EQ(output.channels, input.channels);
-  EXPECT_EQ(output.samples, input.samples);
+  ASSERT_EQ(output.samples.size(), input.samples.size());
+  float diff_sum = 0.0f;
+  for (std::size_t i = 0; i < input.samples.size(); ++i) {
+    diff_sum += std::fabs(output.samples[i] - input.samples[i]);
+  }
+  EXPECT_GT(diff_sum, 1e-6f);
 }
 
 TEST(PeAudioProcess, LogMelSpectrogramShapesAndMaxZeroDb) {
@@ -212,19 +217,24 @@ TEST(PeAudioProcess, LogMelSpectrogramShapesAndMaxZeroDb) {
   MelSpectrogram spec = log_mel_spectrogram(
       input, 64, 32, 64, 8, 16, 0.0f, 8000.0f);
 
-  EXPECT_EQ(spec.frames, 7u);
+  EXPECT_EQ(spec.frames, 9u);
   EXPECT_EQ(spec.n_mels, 8u);
   EXPECT_EQ(spec.total_mels, 16u);
-  EXPECT_EQ(spec.mel_spec.size(), 16u * 7u);
-  EXPECT_EQ(spec.normalized.size(), 7u * 8u);
+  EXPECT_EQ(spec.mel_spec.size(), 16u * 9u);
+  EXPECT_EQ(spec.normalized.size(), 9u * 8u);
 
   float max_db = -1e9f;
+  float min_db = 1e9f;
   for (float v : spec.normalized) {
     if (v > max_db) {
       max_db = v;
     }
+    if (v < min_db) {
+      min_db = v;
+    }
   }
   EXPECT_NEAR(max_db, 0.0f, 1e-3f);
+  EXPECT_GE(min_db, -80.0f);
 }
 
 TEST(PeAudioProcess, PcenMelSpectrogramFiniteNonNegative) {
@@ -241,7 +251,7 @@ TEST(PeAudioProcess, PcenMelSpectrogramFiniteNonNegative) {
   MelSpectrogram spec = pcen_mel_spectrogram(
       input, 64, 32, 64, 8, 16, 0.0f, 8000.0f);
 
-  ASSERT_EQ(spec.normalized.size(), 7u * 8u);
+  ASSERT_EQ(spec.normalized.size(), 9u * 8u);
   for (float v : spec.normalized) {
     EXPECT_TRUE(std::isfinite(v));
     EXPECT_GE(v, 0.0f);
@@ -256,6 +266,18 @@ TEST(PeAudioProcess, MelSpectrogramInvalidParamsEmpty) {
 
   MelSpectrogram spec = log_mel_spectrogram(
       input, 0, 32, 64, 8, 16, 0.0f, 8000.0f);
+  EXPECT_TRUE(spec.mel_spec.empty());
+  EXPECT_TRUE(spec.normalized.empty());
+}
+
+TEST(PeAudioProcess, MelSpectrogramShortSignalReturnsEmpty) {
+  PEAudoBuffer input;
+  input.sample_rate = 16000;
+  input.channels = 1;
+  input.samples.resize(32, 0.0f);
+
+  MelSpectrogram spec = log_mel_spectrogram(
+      input, 64, 32, 64, 8, 16, 0.0f, 8000.0f);
   EXPECT_TRUE(spec.mel_spec.empty());
   EXPECT_TRUE(spec.normalized.empty());
 }
