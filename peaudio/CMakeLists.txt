@@ -14,6 +14,6 @@ elseif (UNIX)
   target_link_libraries(miniaudio INTERFACE Threads::Threads dl m)
 endif()
 
-add_library(peaudio STATIC peaudio.cpp)
+add_library(peaudio STATIC peaudio.cpp peprocess.cpp)
 target_include_directories(peaudio PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(peaudio PUBLIC miniaudio)

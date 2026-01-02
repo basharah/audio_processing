@@ -202,6 +202,36 @@ int save_wav(const char* output_path, const PEAudoBuffer& buffer) {
   return 0;
 }
 
+PEAudoBuffer load_wav(const char* input_path) {
+  PEAudoBuffer buffer;
+  if (input_path == NULL) {
+    return buffer;
+  }
+
+  ma_decoder decoder;
+  ma_decoder_config decoder_config = ma_decoder_config_init(ma_format_f32, 0, 0);
+  if (ma_decoder_init_file(input_path, &decoder_config, &decoder) != MA_SUCCESS) {
+    return buffer;
+  }
+
+  ma_uint64 frame_count = 0;
+  if (ma_decoder_get_length_in_pcm_frames(&decoder, &frame_count) != MA_SUCCESS) {
+    ma_decoder_uninit(&decoder);
+    return buffer;
+  }
+
+  buffer.sample_rate = decoder.outputSampleRate;
+  buffer.channels = decoder.outputChannels;
+  buffer.samples.resize(frame_count * buffer.channels);
+
+  ma_uint64 frames_read = 0;
+  ma_decoder_read_pcm_frames(&decoder, buffer.samples.data(), frame_count, &frames_read);
+  buffer.samples.resize(frames_read * buffer.channels);
+
+  ma_decoder_uninit(&decoder);
+  return buffer;
+}
+
 struct PlaybackBufferData {
   const float* samples = nullptr;
   std::size_t total_frames = 0;

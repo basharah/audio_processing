@@ -1,0 +1,11 @@
+# Features
+- List audio devices (playback and capture).
+- Record audio from a capture device into `PEAudoBuffer`.
+- Save `PEAudoBuffer` to WAV.
+- Load WAV into `PEAudoBuffer`.
+- Playback from a buffer.
+- Playback from a file.
+- Resample a buffer (linear interpolation).
+- Low-pass and high-pass filters (first-order RC).
+- Butterworth low/high filter with filtfilt-style processing (order 2/4).
+- Stereo-to-mono conversion (channel averaging).
